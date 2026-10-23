@@ -1,0 +1,1275 @@
+import { useEffect, useState, useRef, useCallback } from "react";
+import { useUserAuth } from "../context/UserAuthContext.jsx";
+import api from "../api/client";
+
+function getOrCreateSessionId() {
+  let sid = sessionStorage.getItem("oc_global_sec_session_id");
+  if (!sid) {
+    sid = "SEC-" + Math.random().toString(36).substring(2, 9).toUpperCase();
+    sessionStorage.setItem("oc_global_sec_session_id", sid);
+  }
+  return sid;
+}
+
+export default function GlobalSecurityGuard({ children }) {
+  const { user } = useUserAuth();
+
+  // Full-Screen Security Screen State:
+  // Pre-emptively activates covering 100% of the screen BEFORE the capture can grab content.
+  const [screenLock, setScreenLock] = useState(null); // { title, shortcut, reason, time }
+  const [infoToast, setInfoToast] = useState(null);
+
+  const infoToastTimerRef = useRef(null);
+  const lastLogRef = useRef({});
+
+  // Deep modifier & key state tracking with continuous rolling timestamps
+  // (Survives keyup so focus-loss / blur events can correlate OS-level global hotkeys like Win+G)
+  const lastMetaTimeRef = useRef(0);
+  const lastShiftTimeRef = useRef(0);
+  const lastAltTimeRef = useRef(0);
+  const lastCtrlTimeRef = useRef(0);
+  const lastGTimeRef = useRef(0);
+  const lastRTimeRef = useRef(0);
+  const lastSTimeRef = useRef(0);
+  const lastPrtScnTimeRef = useRef(0);
+
+  const lastKeyDownTimeRef = useRef(0);
+  const lastKeyCodeRef = useRef("");
+  const lastKeyNameRef = useRef("");
+
+  const metaDownRef = useRef(false);
+  const shiftDownRef = useRef(false);
+  const altDownRef = useRef(false);
+  const ctrlDownRef = useRef(false);
+
+  const isHoveringIframeRef = useRef(false);
+  const awayGuardRef = useRef(null);
+  const wasBackgroundedRef = useRef(false);
+
+  const isPaymentActive = useCallback(() => {
+    try {
+      if (typeof window !== "undefined" && window.__OC_PAYMENT_ACTIVE__) return true;
+      if (
+        typeof document !== "undefined" &&
+        document.querySelector('.razorpay-container, .razorpay-backdrop, [class*="razorpay"], iframe[src*="razorpay"]')
+      ) {
+        return true;
+      }
+      if (
+        typeof document !== "undefined" &&
+        document.activeElement &&
+        (document.activeElement.tagName === "IFRAME" ||
+          document.activeElement.closest?.('.razorpay-container, [class*="razorpay"]'))
+      ) {
+        return true;
+      }
+    } catch {}
+    return false;
+  }, []);
+
+  const sessionId = getOrCreateSessionId();
+  const username = user?.name || "Student User";
+
+  // ─── Instant Clipboard Sanitizer ──────────────────────────────────────────
+  const clearClipboard = useCallback(() => {
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        navigator.clipboard
+          .writeText(
+            "🚫 [SECURITY NOTICE]: Screenshots, screen clipping, and video recordings are strictly prohibited on the Online Class platform. All educational materials are protected under academic copyright."
+          )
+          .catch(() => {});
+      }
+    } catch {}
+  }, []);
+
+  // ─── Immediate Media Stop ──────────────────────────────────────────────────
+  const pauseProtectedMedia = useCallback(() => {
+    try {
+      document.querySelectorAll("video, audio").forEach((m) => {
+        try {
+          m.pause();
+          m.removeAttribute("autoplay");
+        } catch {}
+      });
+    } catch {}
+  }, []);
+
+  // ─── Backend Audit Dispatcher ─────────────────────────────────────────────
+  const logSecurityIncident = useCallback(
+    (eventType, details = {}) => {
+      const now = Date.now();
+      if (now - (lastLogRef.current[eventType] || 0) < 2000) return;
+      lastLogRef.current[eventType] = now;
+      api
+        .post("/security/log", {
+          event_type: eventType,
+          username,
+          session_id: sessionId,
+          meta: {
+            ...details,
+            url: typeof window !== "undefined" ? window.location.href : "",
+            time: new Date().toISOString(),
+          },
+        })
+        .catch(() => {});
+    },
+    [username, sessionId]
+  );
+
+  // ─── PRIMARY FULL-SCREEN SECURITY LOCKDOWN ENGINE ─────────────────────────
+  // Instantly covers the ENTIRE SCREEN with the official DRM Security Screen.
+  // Uses synchronous DOM class injection + React state so the screen is covered
+  // in 0.1ms BEFORE the OS capture buffer or compositor takes a snapshot.
+  const activateFullSecurityScreen = useCallback(
+    (title, shortcut, reason, auditEvent = "screen_capture_blocked") => {
+      // 1. Immediate synchronous DOM coverage
+      try {
+        document.documentElement.classList.add("oc-screen-lock-active");
+      } catch {}
+
+      // 2. Clear clipboard & stop all media streams
+      clearClipboard();
+      pauseProtectedMedia();
+
+      // 3. Mount authoritative full-screen security screen
+      setScreenLock({
+        title: title || "SCREEN CAPTURE & RECORDING RESTRICTED",
+        shortcut: shortcut || "Screenshot / Screen Recording Shortcut",
+        reason:
+          reason ||
+          "Taking screenshots (Win+Shift+S, PrtScn) or recording videos (Win+G, Win+Alt+R, OBS) is prohibited under platform security policies.",
+        time: new Date().toLocaleTimeString(),
+      });
+
+      // 4. Log event to backend security audit trail
+      logSecurityIncident(auditEvent, { title, shortcut, reason });
+    },
+    [clearClipboard, pauseProtectedMedia, logSecurityIncident]
+  );
+
+  // ─── MOBILE APP-SWITCHER / LOCK-SCREEN GUARD ──────────────────────────────
+  // A website cannot detect or block a phone's screenshot/screen-record
+  // gesture (no browser API exists for that). What IS real and preventable:
+  // the OS takes a live snapshot of the page the instant the app is
+  // backgrounded (for the app-switcher / "recents" preview, or on screen
+  // lock). This toggles a full-screen cover the moment that happens, so that
+  // snapshot captures only this cover — never the protected document/video —
+  // and removes it the instant the app is foregrounded again.
+  const showAwayGuard = useCallback(() => {
+    try {
+      awayGuardRef.current?.classList.add("oc-away-guard--visible");
+    } catch {}
+  }, []);
+
+  const hideAwayGuard = useCallback(() => {
+    try {
+      awayGuardRef.current?.classList.remove("oc-away-guard--visible");
+    } catch {}
+  }, []);
+
+  // Resume viewing: student acknowledges and returns cleanly to learning
+  const dismissSecurityScreen = useCallback(() => {
+    try {
+      document.documentElement.classList.remove("oc-screen-lock-active");
+    } catch {}
+    setScreenLock(null);
+    metaDownRef.current = false;
+    shiftDownRef.current = false;
+    altDownRef.current = false;
+    ctrlDownRef.current = false;
+    clearClipboard();
+  }, [clearClipboard]);
+
+  // ─── Info Toast (Login confirmation) ──────────────────────────────────────
+  const showInfoToast = useCallback((message) => {
+    if (infoToastTimerRef.current) clearTimeout(infoToastTimerRef.current);
+    setInfoToast({ message });
+    infoToastTimerRef.current = setTimeout(() => setInfoToast(null), 6000);
+  }, []);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    try {
+      if (sessionStorage.getItem("oc_show_login_security_notice") !== "1") return;
+      sessionStorage.removeItem("oc_show_login_security_notice");
+    } catch {
+      return;
+    }
+    showInfoToast("🔒 Security protection is active. Educational materials are monitored and restricted.");
+    logSecurityIncident("security_session_started", { trigger: "successful_login" });
+  }, [user?.id, showInfoToast, logSecurityIncident]);
+
+  // ─── LAYER 1: Deep Web API Interceptions ──────────────────────────────────
+  useEffect(() => {
+    if (typeof navigator !== "undefined" && navigator.mediaDevices) {
+      try {
+        Object.defineProperty(navigator.mediaDevices, "getDisplayMedia", {
+          value: async function () {
+            activateFullSecurityScreen(
+              "SCREEN RECORDING BLOCKED",
+              "Browser getDisplayMedia() API",
+              "Screen recording tools and browser capture extensions are disabled on this platform. Video playback has been paused.",
+              "screen_record_getDisplayMedia"
+            );
+            throw new DOMException("Screen recording is disabled on this platform.", "NotAllowedError");
+          },
+          writable: false,
+          configurable: false,
+        });
+      } catch {}
+    }
+
+    if (typeof window !== "undefined" && window.MediaRecorder) {
+      try {
+        const OrigMediaRecorder = window.MediaRecorder;
+        window.MediaRecorder = function () {
+          activateFullSecurityScreen(
+            "MEDIA RECORDING BLOCKED",
+            "MediaRecorder Web API",
+            "Direct media recording tools are prohibited on this platform. This incident has been logged.",
+            "screen_record_MediaRecorder"
+          );
+          throw new DOMException("Media recording is disabled.", "NotAllowedError");
+        };
+        window.MediaRecorder.prototype = OrigMediaRecorder.prototype;
+        window.MediaRecorder.isTypeSupported = OrigMediaRecorder.isTypeSupported;
+      } catch {}
+    }
+
+    if (typeof HTMLMediaElement !== "undefined") {
+      ["captureStream", "mozCaptureStream"].forEach((method) => {
+        try {
+          if (HTMLMediaElement.prototype[method]) {
+            HTMLMediaElement.prototype[method] = function () {
+              activateFullSecurityScreen(
+                "DIRECT STREAM CAPTURE BLOCKED",
+                "HTMLMediaElement.captureStream()",
+                "Direct stream extraction and media recording is not permitted. Playback has been stopped.",
+                "stream_capture_media_element"
+              );
+              throw new DOMException("Stream capture disabled.", "NotAllowedError");
+            };
+          }
+        } catch {}
+      });
+    }
+
+    if (typeof HTMLCanvasElement !== "undefined" && HTMLCanvasElement.prototype.captureStream) {
+      try {
+        HTMLCanvasElement.prototype.captureStream = function () {
+          activateFullSecurityScreen(
+            "CANVAS RECORDING BLOCKED",
+            "HTMLCanvasElement.captureStream()",
+            "Canvas stream capture is prohibited. Attempt has been recorded.",
+            "stream_capture_canvas"
+          );
+          throw new DOMException("Canvas capture disabled.", "NotAllowedError");
+        };
+      } catch {}
+    }
+
+    if (typeof HTMLVideoElement !== "undefined" && HTMLVideoElement.prototype.requestPictureInPicture) {
+      try {
+        HTMLVideoElement.prototype.requestPictureInPicture = async function () {
+          activateFullSecurityScreen(
+            "SCREENSHOT & SCREEN RECORDING RESTRICTED",
+            "Picture-in-Picture Floating Window",
+            "⚠️ You cannot able to take screen short. Picture-in-Picture video mode is prohibited to prevent external screen recording.",
+            "screen_record_pip"
+          );
+          throw new DOMException("Picture-in-Picture mode is disabled.", "NotAllowedError");
+        };
+      } catch {}
+    }
+
+    try {
+      Object.defineProperty(window, "print", {
+        value: function () {
+          activateFullSecurityScreen(
+            "PRINTING RESTRICTED",
+            "window.print() / Print Command",
+            "Printing and PDF export of course materials is not permitted under institutional policies.",
+            "print_attempt"
+          );
+        },
+        writable: false,
+        configurable: false,
+      });
+    } catch {}
+
+    ["oncontextmenu", "oncopy", "oncut", "onselectstart", "ondragstart"].forEach((prop) => {
+      try {
+        Object.defineProperty(document, prop, {
+          get: () => (e) => {
+            if (e?.preventDefault) e.preventDefault();
+            return false;
+          },
+          set: () => false,
+          configurable: false,
+        });
+      } catch {}
+    });
+  }, [activateFullSecurityScreen]);
+
+  // ─── LAYER 2: Media Hardening & Extension Scanner ─────────────────────────
+  useEffect(() => {
+    const EXTENSION_MARKERS = [
+      "loom-companion",
+      "nimbus",
+      "fireshot",
+      "gofullpage",
+      "screencastify",
+      "vidyard",
+      "screen-recorder",
+      "video-downloader",
+      "download-helper",
+      "allow-copy",
+      "enable-copy",
+    ];
+
+    // One combined selector instead of 11 separate full-document scans.
+    const markerSelector = (marker) => `[id*="${marker}" i], [class*="${marker}" i], [src*="${marker}" i]`;
+    const COMBINED_MARKER_SELECTOR = EXTENSION_MARKERS.map(markerSelector).join(", ");
+
+    const hardenAndScan = () => {
+      document.querySelectorAll("video").forEach((v) => {
+        if (v.getAttribute("controlsList") !== "nodownload noplaybackrate noremoteplayback") {
+          v.setAttribute("controlsList", "nodownload noplaybackrate noremoteplayback");
+        }
+        v.disablePictureInPicture = true;
+        v.disableRemotePlayback = true;
+        if (!v.oncontextmenu) {
+          v.oncontextmenu = (e) => {
+            e.preventDefault();
+            return false;
+          };
+        }
+      });
+      document.querySelectorAll("img").forEach((img) => {
+        // Already hardened on an earlier pass — nothing more to do for this image.
+        if (img.oncontextmenu) return;
+        img.setAttribute("draggable", "false");
+        img.oncontextmenu = (e) => {
+          e.preventDefault();
+          return false;
+        };
+      });
+      document.querySelectorAll(COMBINED_MARKER_SELECTOR).forEach((el) => {
+        if (el.closest(".oc-app-shell") || el.closest(".oc-full-security-screen")) return;
+        try {
+          const marker = EXTENSION_MARKERS.find((m) => el.matches(markerSelector(m)));
+          el.remove();
+          logSecurityIncident("extension_marker_neutralized", { marker });
+        } catch {}
+      });
+    };
+
+    // Scan immediately on mount, then re-scan whenever new nodes appear. Bursts of DOM
+    // changes (every React render, scroll-driven updates, route changes) are merged into a
+    // single scan per frame instead of running the full scan synchronously for each one.
+    // Removed nodes cannot introduce new media or extension elements, so they are ignored.
+    hardenAndScan();
+    let scanFrame = null;
+    const observer = new MutationObserver((mutations) => {
+      if (scanFrame !== null) return;
+      if (!mutations.some((m) => m.addedNodes && m.addedNodes.length > 0)) return;
+      scanFrame = requestAnimationFrame(() => {
+        scanFrame = null;
+        hardenAndScan();
+      });
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    return () => {
+      observer.disconnect();
+      if (scanFrame !== null) cancelAnimationFrame(scanFrame);
+    };
+  }, [logSecurityIncident]);
+
+  // ─── LAYER 3: Pre-Emptive Key Interception & Correlation Engine ───────────
+  useEffect(() => {
+    const blockEvent = (e) => {
+      const isInput = e.target?.matches?.("input, textarea, [contenteditable='true']");
+      if (!isInput) {
+        e.preventDefault();
+        e.stopPropagation();
+        return false;
+      }
+    };
+    const blockAlways = (e) => {
+      e.preventDefault();
+      return false;
+    };
+
+    const handleKeyDown = (e) => {
+      const now = Date.now();
+      const key = (e.key || "").toLowerCase();
+      const code = e.code || "";
+      const keyCode = e.keyCode || 0;
+
+      const isMeta =
+        key === "meta" ||
+        code.startsWith("Meta") ||
+        code.startsWith("OS") ||
+        keyCode === 91 ||
+        keyCode === 92;
+      const isShift = key === "shift" || code.startsWith("Shift") || keyCode === 16;
+      const isAlt = key === "alt" || code.startsWith("Alt") || keyCode === 18;
+      const isCtrl = key === "control" || code.startsWith("Control") || keyCode === 17;
+
+      const isGKey = key === "g" || keyCode === 71 || code === "KeyG";
+      const isRKey = key === "r" || keyCode === 82 || code === "KeyR";
+      const isSKey = key === "s" || keyCode === 83 || code === "KeyS";
+      const isPrtScnKey =
+        key === "printscreen" || keyCode === 44 || code === "PrintScreen" || key === "snapshot";
+
+      // Track timestamps
+      if (isMeta) {
+        metaDownRef.current = true;
+        lastMetaTimeRef.current = now;
+      }
+      if (isShift) {
+        shiftDownRef.current = true;
+        lastShiftTimeRef.current = now;
+      }
+      if (isAlt) {
+        altDownRef.current = true;
+        lastAltTimeRef.current = now;
+      }
+      if (isCtrl) {
+        ctrlDownRef.current = true;
+        lastCtrlTimeRef.current = now;
+      }
+      if (isGKey) {
+        lastGTimeRef.current = now;
+      }
+      if (isRKey) {
+        lastRTimeRef.current = now;
+      }
+      if (isSKey) {
+        lastSTimeRef.current = now;
+      }
+      if (isPrtScnKey) {
+        lastPrtScnTimeRef.current = now;
+      }
+
+      lastKeyDownTimeRef.current = now;
+      lastKeyCodeRef.current = code;
+      lastKeyNameRef.current = key;
+
+      const timeSinceMeta = now - lastMetaTimeRef.current;
+      const timeSinceShift = now - lastShiftTimeRef.current;
+      const timeSinceAlt = now - lastAltTimeRef.current;
+      const timeSinceCtrl = now - lastCtrlTimeRef.current;
+      const timeSinceG = now - lastGTimeRef.current;
+
+      const metaActive = e.metaKey || metaDownRef.current || timeSinceMeta < 6000;
+      const shiftActive = e.shiftKey || shiftDownRef.current || timeSinceShift < 2500;
+      const altActive = e.altKey || altDownRef.current || timeSinceAlt < 2500;
+      const ctrlActive = e.ctrlKey || ctrlDownRef.current || timeSinceCtrl < 2500;
+
+      // ───────────────────────────────────────────────────────────────────────
+      // 1. WIN + G (Windows Xbox Game Bar) — MULTI-VECTOR DETECTION
+      //    Vector A: G is pressed while Win key is active/held (or within 6 seconds)
+      //    Vector B: Win key is pressed while G was recently struck (within 4 seconds)
+      // ───────────────────────────────────────────────────────────────────────
+      if (isGKey && (metaActive || e.metaKey || timeSinceMeta < 6000)) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        activateFullSecurityScreen(
+          "GAME BAR OVERLAY RESTRICTED",
+          "Win+G (Windows Game Bar)",
+          "Xbox Game Bar overlay shortcut (Win+G) was detected. Screen recording overlays and capture widgets are disabled on protected content.",
+          "screen_record_gamebar_keydown"
+        );
+        return false;
+      }
+
+      if (isMeta && (timeSinceG < 4000 || lastKeyNameRef.current === "g" || lastKeyCodeRef.current === "KeyG")) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        activateFullSecurityScreen(
+          "GAME BAR OVERLAY RESTRICTED",
+          "Win+G (Windows Game Bar)",
+          "Xbox Game Bar overlay shortcut (Win+G) was detected. Screen capture widgets are prohibited. Content protected.",
+          "screen_record_gamebar_reverse_keydown"
+        );
+        return false;
+      }
+
+      // ───────────────────────────────────────────────────────────────────────
+      // 2. PRINTSCREEN (PrtScn key — all combinations)
+      // ───────────────────────────────────────────────────────────────────────
+      if (isPrtScnKey || (altActive && keyCode === 44) || (ctrlActive && keyCode === 44) || (metaActive && keyCode === 44)) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        activateFullSecurityScreen(
+          "SCREEN CAPTURE RESTRICTED",
+          "PrtScn (PrintScreen Key)",
+          "The PrintScreen key was pressed. Taking screenshots of course slides, video frames, or documents is strictly prohibited under institutional security policies.",
+          "screenshot_prtscn"
+        );
+        return false;
+      }
+
+      // ───────────────────────────────────────────────────────────────────────
+      // 3. PRE-EMPTIVE WIN + SHIFT + S (Windows Snipping Tool)
+      //    Triggered the exact millisecond Win+Shift are pressed together (BEFORE 'S'!)
+      // ───────────────────────────────────────────────────────────────────────
+      const isWinShiftPreemptive =
+        (metaActive && isShift) ||
+        (shiftActive && isMeta) ||
+        (metaActive && shiftActive && isSKey) ||
+        ((ctrlActive || altActive) && shiftActive && isSKey) ||
+        (metaActive && isSKey);
+
+      if (isWinShiftPreemptive) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        activateFullSecurityScreen(
+          "SNIPPING TOOL RESTRICTED",
+          "Win+Shift+S (Snipping Tool)",
+          "Windows Snipping Tool (Win+Shift+S) was detected. Screen clipping and capture shortcuts are disabled. The entire screen is protected.",
+          "screenshot_snipping_tool"
+        );
+        return false;
+      }
+
+      // ───────────────────────────────────────────────────────────────────────
+      // 4. PRE-EMPTIVE WIN + ALT + R (Windows Game Bar Screen Recording)
+      //    Triggered the exact millisecond Win+Alt are pressed together (BEFORE 'R'!)
+      // ───────────────────────────────────────────────────────────────────────
+      const isWinAltPreemptive =
+        (metaActive && isAlt) ||
+        (altActive && isMeta) ||
+        (metaActive && altActive && isRKey) ||
+        (altActive && isRKey && (metaActive || ctrlActive));
+
+      if (isWinAltPreemptive) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        activateFullSecurityScreen(
+          "SCREEN RECORDING PROHIBITED",
+          "Win+Alt+R (Game Bar Screen Recorder)",
+          "Win+Alt+R Game Bar video recording shortcut was initiated. Recording of educational video lectures is strictly prohibited. Video stream has been stopped.",
+          "screen_record_win_alt_r"
+        );
+        return false;
+      }
+
+      // ───────────────────────────────────────────────────────────────────────
+      // 5. MACOS NATIVE: Cmd+Shift+3, Cmd+Shift+4, Cmd+Shift+5, Cmd+Shift+6, 7
+      // ───────────────────────────────────────────────────────────────────────
+      const isMacCmdShift = (e.metaKey || ctrlActive) && shiftActive;
+      if (isMacCmdShift) {
+        if (key === "5" || code === "Digit5") {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          activateFullSecurityScreen(
+            "SCREEN RECORDING TOOLBAR RESTRICTED",
+            "Cmd+Shift+5 (macOS Screen Recording)",
+            "macOS Screen Recording toolbar was initiated. Recording of educational media is not permitted. Video playback has been stopped.",
+            "screen_record_mac_cmd5"
+          );
+          return false;
+        }
+        if (["3", "4", "6", "7"].includes(key)) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          activateFullSecurityScreen(
+            "SCREENSHOT RESTRICTED",
+            `Cmd+Shift+${key} (macOS Screenshot)`,
+            "macOS screen capture shortcut was initiated. Screenshots of course content are prohibited.",
+            "screenshot_mac_cmd34"
+          );
+          return false;
+        }
+      }
+
+      // ───────────────────────────────────────────────────────────────────────
+      // 6. GPU RECORDERS (NVIDIA ShadowPlay: Alt+Z, Alt+F9; AMD Radeon)
+      // ───────────────────────────────────────────────────────────────────────
+      const isGpuRecorder =
+        (altActive && (key === "z" || code === "KeyZ" || key === "f9" || code === "F9" || key === "f10" || code === "F10" || key === "f1" || code === "F1")) ||
+        (ctrlActive && shiftActive && ["e", "g", "s"].includes(key));
+
+      if (isGpuRecorder) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        activateFullSecurityScreen(
+          "GPU SCREEN RECORDER RESTRICTED",
+          "NVIDIA ShadowPlay / AMD Radeon Hotkey",
+          "Hardware GPU recording and instant replay capture shortcuts are disabled. Video playback has been paused.",
+          "screen_record_gpu"
+        );
+        return false;
+      }
+
+      // ───────────────────────────────────────────────────────────────────────
+      // 7. THIRD-PARTY RECORDERS (OBS, Loom, Snagit, Camtasia, Bandicam)
+      // ───────────────────────────────────────────────────────────────────────
+      const isThirdPartyTool =
+        (ctrlActive && shiftActive && ["r", "l", "c", "x", "v"].includes(key)) ||
+        (ctrlActive && altActive && isRKey) ||
+        (altActive && (key === "f11" || key === "f12")) ||
+        key === "f9" ||
+        code === "F9" ||
+        key === "f10" ||
+        code === "F10";
+
+      if (isThirdPartyTool) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        activateFullSecurityScreen(
+          "EXTERNAL RECORDER SHORTCUT BLOCKED",
+          "Screen Recording Tool Shortcut (OBS / Loom / Snagit)",
+          "External screen recording tool shortcuts were detected. Video stream has been paused and attempt recorded.",
+          "screen_record_external_tool"
+        );
+        return false;
+      }
+
+      // ───────────────────────────────────────────────────────────────────────
+      // 8. PRINT (Ctrl+P), SAVE (Ctrl+S), DEVTOOLS (F12, Ctrl+Shift+I/J/C)
+      // ───────────────────────────────────────────────────────────────────────
+      if (ctrlActive && (key === "p" || code === "KeyP")) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        activateFullSecurityScreen(
+          "PRINTING RESTRICTED",
+          "Ctrl+P (Print Page)",
+          "Printing and saving course materials to PDF is strictly prohibited.",
+          "print_attempt"
+        );
+        return false;
+      }
+      if (ctrlActive && !shiftActive && (key === "s" || code === "KeyS")) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        logSecurityIncident("save_attempt");
+        return false;
+      }
+      if (
+        key === "f12" ||
+        keyCode === 123 ||
+        (ctrlActive && (key === "u" || code === "KeyU")) ||
+        (ctrlActive && shiftActive && ["i", "j", "c"].includes(key)) ||
+        (metaActive && altActive && ["i", "j", "c"].includes(key))
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        logSecurityIncident("devtools_attempt");
+        return false;
+      }
+    };
+
+    // ── KEY UP LISTENER (Handles OS hooks that swallow keydown but pass keyup) ──
+    const handleKeyUp = (e) => {
+      const now = Date.now();
+      const key = (e.key || "").toLowerCase();
+      const code = e.code || "";
+      const keyCode = e.keyCode || 0;
+
+      const isGKey = key === "g" || keyCode === 71 || code === "KeyG";
+      const isRKey = key === "r" || keyCode === 82 || code === "KeyR";
+      const isSKey = key === "s" || keyCode === 83 || code === "KeyS";
+      const isMeta =
+        key === "meta" ||
+        code.startsWith("Meta") ||
+        code.startsWith("OS") ||
+        keyCode === 91 ||
+        keyCode === 92;
+
+      // KeyUp catch for Win+G: if G is released while Meta was touched within 6s
+      if (isGKey && (metaDownRef.current || (now - lastMetaTimeRef.current < 6000) || e.metaKey)) {
+        e.preventDefault();
+        e.stopPropagation();
+        activateFullSecurityScreen(
+          "GAME BAR OVERLAY RESTRICTED",
+          "Win+G (Windows Game Bar)",
+          "Xbox Game Bar overlay shortcut (Win+G) was detected. The entire screen is protected.",
+          "screen_record_gamebar_keyup"
+        );
+        return;
+      }
+
+      // KeyUp catch for Win+Alt+R: if R is released while Alt/Meta was touched
+      if (isRKey && ((now - lastAltTimeRef.current < 6000) || (now - lastMetaTimeRef.current < 6000))) {
+        e.preventDefault();
+        e.stopPropagation();
+        activateFullSecurityScreen(
+          "SCREEN RECORDING PROHIBITED",
+          "Win+Alt+R (Game Bar Screen Recording)",
+          "Win+Alt+R Game Bar video recording shortcut was initiated. Video playback has been stopped.",
+          "screen_record_win_alt_r_keyup"
+        );
+        return;
+      }
+
+      // KeyUp catch for Win+Shift+S: if S is released while Shift/Meta was touched
+      if (isSKey && ((now - lastShiftTimeRef.current < 6000) || (now - lastMetaTimeRef.current < 6000))) {
+        e.preventDefault();
+        e.stopPropagation();
+        activateFullSecurityScreen(
+          "SNIPPING TOOL RESTRICTED",
+          "Win+Shift+S (Snipping Tool)",
+          "Windows Snipping Tool (Win+Shift+S) was detected. The entire screen is protected.",
+          "screenshot_snipping_tool_keyup"
+        );
+        return;
+      }
+
+      // Meta keyup fallback
+      if (isMeta) {
+        metaDownRef.current = false;
+        if (now - lastGTimeRef.current < 4000) {
+          activateFullSecurityScreen(
+            "GAME BAR OVERLAY RESTRICTED",
+            "Win+G (Windows Game Bar)",
+            "Xbox Game Bar overlay shortcut (Win+G) was detected. The entire screen is protected.",
+            "screen_record_gamebar_meta_keyup"
+          );
+          return;
+        }
+      }
+
+      if (key === "shift" || code.startsWith("Shift") || keyCode === 16) {
+        shiftDownRef.current = false;
+      }
+      if (key === "alt" || code.startsWith("Alt") || keyCode === 18) {
+        altDownRef.current = false;
+      }
+      if (key === "control" || code.startsWith("Control") || keyCode === 17) {
+        ctrlDownRef.current = false;
+      }
+
+      // PrtScn fallback for keyboards that only fire on release
+      if (key === "printscreen" || keyCode === 44 || code === "PrintScreen" || key === "snapshot") {
+        e.preventDefault();
+        e.stopPropagation();
+        activateFullSecurityScreen(
+          "SCREEN CAPTURE RESTRICTED",
+          "PrtScn (PrintScreen Key Release)",
+          "PrintScreen screenshot command was detected and blocked. The entire screen is protected.",
+          "screenshot_prtscn_keyup"
+        );
+      }
+    };
+
+    // ─── WINDOW BLUR: Focus Loss / OS Stealing Interception ─────────────────
+    // When Windows Xbox Game Bar (Win+G), Snipping Tool (Win+Shift+S), or
+    // Game Bar Recording (Win+Alt+R) activates, the OS consumes the keystroke
+    // and causes a window blur. We correlate the rolling timestamps to lock down immediately!
+    const handleWindowBlur = () => {
+      if (isPaymentActive() || isHoveringIframeRef.current) {
+        metaDownRef.current = false;
+        shiftDownRef.current = false;
+        altDownRef.current = false;
+        ctrlDownRef.current = false;
+        return;
+      }
+
+      // If document is already focusing an input or interactive control inside page, ignore blur
+      if (
+        document.activeElement &&
+        document.activeElement.matches?.("input, textarea, select, [contenteditable='true']")
+      ) {
+        return;
+      }
+
+      const now = Date.now();
+      const timeSinceMeta = now - lastMetaTimeRef.current;
+      const timeSinceShift = now - lastShiftTimeRef.current;
+      const timeSinceAlt = now - lastAltTimeRef.current;
+      const timeSinceG = now - lastGTimeRef.current;
+      const timeSinceR = now - lastRTimeRef.current;
+      const timeSinceS = now - lastSTimeRef.current;
+      const lastKey = lastKeyCodeRef.current.toLowerCase();
+      const lastKeyName = lastKeyNameRef.current.toLowerCase();
+
+      clearClipboard();
+      pauseProtectedMedia();
+
+      // Case 1: Windows Snipping Tool (Win+Shift+S)
+      const isBlurWinShiftS =
+        (timeSinceMeta < 6000 && timeSinceShift < 6000) ||
+        (timeSinceShift < 4000 && timeSinceS < 4000) ||
+        (timeSinceMeta < 4000 && (lastKey === "keys" || lastKeyName === "s"));
+
+      if (isBlurWinShiftS) {
+        activateFullSecurityScreen(
+          "SNIPPING TOOL RESTRICTED",
+          "Win+Shift+S (Snipping Tool)",
+          "Windows Snipping Tool was detected when window focus changed. The entire screen has been protected.",
+          "screenshot_snipping_tool_blur"
+        );
+        return;
+      }
+
+      // Case 2: Windows Game Bar Screen Recording (Win+Alt+R)
+      const isBlurWinAltR =
+        (timeSinceMeta < 6000 && timeSinceAlt < 6000) ||
+        (timeSinceAlt < 4000 && timeSinceR < 4000) ||
+        (timeSinceMeta < 4000 && (lastKey === "keyr" || lastKeyName === "r"));
+
+      if (isBlurWinAltR) {
+        activateFullSecurityScreen(
+          "SCREEN RECORDING PROHIBITED",
+          "Win+Alt+R (Game Bar Screen Recording)",
+          "Win+Alt+R Game Bar video recording shortcut was detected when focus changed. Video playback has been stopped.",
+          "screen_record_win_alt_r_blur"
+        );
+        return;
+      }
+
+      // Case 3: Windows Game Bar Overlay (Win+G)
+      // When Win+G is pressed, Windows steals focus to launch GameBar.exe.
+      // If Meta was touched within 6 seconds, OR G was touched within 4 seconds,
+      // OR last key was G: it is 100% Win+G!
+      const isBlurWinG =
+        (timeSinceMeta < 6000) ||
+        (timeSinceG < 4000) ||
+        (lastKey === "keyg" || lastKeyName === "g");
+
+      if (isBlurWinG) {
+        activateFullSecurityScreen(
+          "GAME BAR OVERLAY RESTRICTED",
+          "Win+G (Windows Game Bar)",
+          "Xbox Game Bar overlay shortcut (Win+G) was detected when window focus changed. The entire screen has been protected.",
+          "screen_record_gamebar_blur"
+        );
+        return;
+      }
+
+      // Case 4: GPU Recorder Blur (Alt+F9, Alt+Z)
+      const isBlurGpuTool =
+        timeSinceAlt < 2000 &&
+        (lastKey === "f9" || lastKey === "f10" || lastKey === "keyz" || lastKeyName === "z");
+
+      if (isBlurGpuTool) {
+        activateFullSecurityScreen(
+          "GPU SCREEN RECORDER RESTRICTED",
+          "GPU Recorder (Alt+F9 / Alt+Z)",
+          "NVIDIA / AMD screen recording overlay was detected when focus changed.",
+          "screen_record_gpu_blur"
+        );
+        return;
+      }
+
+      // Case 5: Mobile Floating Screen Recorder / Quick Settings Blur
+      // On mobile devices, tapping a floating screen recorder button (AZ Recorder, XRecorder, Mobizen, Game Turbo)
+      // or opening the screen recording dialog causes window blur.
+      const isMobile =
+        typeof navigator !== "undefined" &&
+        (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+          ("ontouchstart" in window && window.innerWidth <= 1024));
+
+      if (isMobile) {
+        showAwayGuard();
+        activateFullSecurityScreen(
+          "SCREENSHOT & SCREEN RECORDING RESTRICTED",
+          "Screen Record / Floating Tool Click",
+          "⚠️ You cannot able to take screen short. Screen recording tools and capture overlays are prohibited.",
+          "mobile_screen_record_blur"
+        );
+        return;
+      }
+    };
+
+    const handleWindowFocus = () => {
+      metaDownRef.current = false;
+      shiftDownRef.current = false;
+      altDownRef.current = false;
+      ctrlDownRef.current = false;
+      clearClipboard();
+    };
+
+    const handleVisibilityChange = () => {
+      clearClipboard();
+      if (document.hidden || document.visibilityState === "hidden") {
+        wasBackgroundedRef.current = true;
+        pauseProtectedMedia();
+        showAwayGuard();
+        logSecurityIncident("app_backgrounded", { trigger: "visibilitychange" });
+      } else if (document.visibilityState === "visible" && !document.hidden) {
+        if (wasBackgroundedRef.current) {
+          wasBackgroundedRef.current = false;
+          if (!isPaymentActive()) {
+            activateFullSecurityScreen(
+              "SCREENSHOT & SCREEN RECORDING RESTRICTED",
+              "Screen Record / Background Return Detected",
+              "⚠️ You cannot able to take screen short. Screen recording and background capture of educational lectures are prohibited.",
+              "screen_record_background_return"
+            );
+          }
+        }
+        hideAwayGuard();
+      }
+    };
+
+    // Mobile Safari/Chrome teardown or suspension (e.g. swiping the app away,
+    // the OS freezing a backgrounded tab, Home button press, screen lock).
+    // e.persisted === true indicates the page is entering / stored in bfcache (iOS Safari).
+    const handlePageHide = (e) => {
+      wasBackgroundedRef.current = true;
+      clearClipboard();
+      pauseProtectedMedia();
+      showAwayGuard();
+      if (e?.persisted) {
+        logSecurityIncident("app_bfcache_entered", { trigger: "pagehide_persisted" });
+      }
+    };
+
+    // On pageshow (e.g. returning from bfcache or multitasking switcher),
+    // verify the page is actually foregrounded and visible before lifting the guard.
+    const handlePageShow = () => {
+      if (document.visibilityState === "visible" && !document.hidden) {
+        if (wasBackgroundedRef.current && !isPaymentActive()) {
+          wasBackgroundedRef.current = false;
+          activateFullSecurityScreen(
+            "SCREENSHOT & SCREEN RECORDING RESTRICTED",
+            "Screen Record / Background Return Detected",
+            "⚠️ You cannot able to take screen short. Screen recording and background capture of educational lectures are prohibited.",
+            "screen_record_background_return"
+          );
+        }
+        hideAwayGuard();
+      }
+    };
+
+    // Page Lifecycle API: freeze / resume (Modern Chromium, Android Chrome, PWA)
+    // Fires when the browser/OS suspends the task or freezes the CPU execution context.
+    const handleFreeze = () => {
+      clearClipboard();
+      pauseProtectedMedia();
+      showAwayGuard();
+      logSecurityIncident("app_frozen", { trigger: "lifecycle_freeze" });
+    };
+
+    const handleResume = () => {
+      if (document.visibilityState === "visible" && !document.hidden) {
+        hideAwayGuard();
+      }
+    };
+
+    // Integration with PageLifecycleGuard custom event if active
+    const handleAppLifecycleCustom = (e) => {
+      if (e?.detail?.state === "sleeping") {
+        pauseProtectedMedia();
+        showAwayGuard();
+      } else if (e?.detail?.state === "active" && !document.hidden) {
+        hideAwayGuard();
+      }
+    };
+
+    const handleBeforePrint = (e) => {
+      e.preventDefault();
+      activateFullSecurityScreen(
+        "PRINTING RESTRICTED",
+        "Browser Print Command",
+        "Printing and PDF generation is strictly prohibited under institutional security policies.",
+        "print_attempt"
+      );
+    };
+
+    const handlePointerOver = (e) => {
+      if (e.target && (e.target.tagName === "IFRAME" || e.target.closest?.("iframe"))) {
+        isHoveringIframeRef.current = true;
+      }
+    };
+    const handlePointerOut = (e) => {
+      if (e.target && (e.target.tagName === "IFRAME" || e.target.closest?.("iframe"))) {
+        isHoveringIframeRef.current = false;
+      }
+    };
+
+    // ── MULTI-TOUCH / 3-FINGER GESTURE DETECTION (Mobile Screenshots) ────────
+    // Android / MIUI / ColorOS / RealmeUI / OxygenOS / FuntouchOS use a 3-finger
+    // swipe or tap for screenshots.
+    // By intercepting touchstart / touchmove with touches.length >= 3,
+    // we activate the away guard synchronously in 0.05ms BEFORE the screenshot
+    // captures the document frame!
+    const activePointersRef = new Set();
+
+    const triggerMultiTouchLock = (source = "3-Finger Screen Gesture") => {
+      showAwayGuard();
+      pauseProtectedMedia();
+      clearClipboard();
+      activateFullSecurityScreen(
+        "SCREENSHOT & SCREEN RECORDING RESTRICTED",
+        source,
+        "⚠️ You cannot able to take screen short. 3-finger swipe screenshot and video recording are prohibited under platform security policies.",
+        "screenshot_3finger_gesture"
+      );
+    };
+
+    // NOTE: registered as a *passive* listener (see below). A non-passive window-level
+    // touchstart/touchmove listener forces the browser to wait for this JavaScript before it
+    // can scroll on every single touch, which makes scrolling feel laggy on phones. The lock
+    // above fires immediately either way, so protection is unchanged; preventDefault() on a
+    // 3-finger touch never stopped the OS screenshot gesture anyway.
+    const handleTouchStartOrMove = (e) => {
+      const touchCount = e.touches?.length || e.targetTouches?.length || 0;
+      if (touchCount >= 3) {
+        triggerMultiTouchLock("3-Finger Screenshot Gesture Detected");
+      }
+    };
+
+    const handlePointerDown = (e) => {
+      if (e.pointerType === "touch" || e.pointerType === "pen") {
+        activePointersRef.add(e.pointerId);
+        if (activePointersRef.size >= 3) {
+          triggerMultiTouchLock("Multi-Touch Screenshot Gesture Detected");
+        }
+      }
+    };
+
+    const handlePointerUpOrCancel = (e) => {
+      activePointersRef.delete(e.pointerId);
+    };
+
+    const opts = { capture: true, passive: false };
+    const optsPassv = { capture: true, passive: true };
+
+    window.addEventListener("contextmenu", blockEvent, opts);
+    window.addEventListener("selectstart", blockEvent, opts);
+    window.addEventListener("dragstart", blockAlways, opts);
+    window.addEventListener("copy", blockEvent, opts);
+    window.addEventListener("cut", blockEvent, opts);
+    window.addEventListener("keydown", handleKeyDown, opts);
+    window.addEventListener("keyup", handleKeyUp, opts);
+    window.addEventListener("beforeprint", handleBeforePrint, opts);
+    window.addEventListener("blur", handleWindowBlur, opts);
+    window.addEventListener("focus", handleWindowFocus, optsPassv);
+    document.addEventListener("visibilitychange", handleVisibilityChange, opts);
+    window.addEventListener("pagehide", handlePageHide, optsPassv);
+    window.addEventListener("pageshow", handlePageShow, optsPassv);
+    document.addEventListener("freeze", handleFreeze, optsPassv);
+    document.addEventListener("resume", handleResume, optsPassv);
+    window.addEventListener("oc:app-lifecycle", handleAppLifecycleCustom, optsPassv);
+    window.addEventListener("pointerover", handlePointerOver, optsPassv);
+    window.addEventListener("pointerout", handlePointerOut, optsPassv);
+    window.addEventListener("touchstart", handleTouchStartOrMove, optsPassv);
+    window.addEventListener("touchmove", handleTouchStartOrMove, optsPassv);
+    window.addEventListener("pointerdown", handlePointerDown, optsPassv);
+    window.addEventListener("pointerup", handlePointerUpOrCancel, optsPassv);
+    window.addEventListener("pointercancel", handlePointerUpOrCancel, optsPassv);
+
+    return () => {
+      window.removeEventListener("contextmenu", blockEvent, opts);
+      window.removeEventListener("selectstart", blockEvent, opts);
+      window.removeEventListener("dragstart", blockAlways, opts);
+      window.removeEventListener("copy", blockEvent, opts);
+      window.removeEventListener("cut", blockEvent, opts);
+      window.removeEventListener("keydown", handleKeyDown, opts);
+      window.removeEventListener("keyup", handleKeyUp, opts);
+      window.removeEventListener("beforeprint", handleBeforePrint, opts);
+      window.removeEventListener("blur", handleWindowBlur, opts);
+      window.removeEventListener("focus", handleWindowFocus, optsPassv);
+      document.removeEventListener("visibilitychange", handleVisibilityChange, opts);
+      window.removeEventListener("pagehide", handlePageHide, optsPassv);
+      window.removeEventListener("pageshow", handlePageShow, optsPassv);
+      document.removeEventListener("freeze", handleFreeze, optsPassv);
+      document.removeEventListener("resume", handleResume, optsPassv);
+      window.removeEventListener("oc:app-lifecycle", handleAppLifecycleCustom, optsPassv);
+      window.removeEventListener("pointerover", handlePointerOver, optsPassv);
+      window.removeEventListener("pointerout", handlePointerOut, optsPassv);
+      window.removeEventListener("touchstart", handleTouchStartOrMove, optsPassv);
+      window.removeEventListener("touchmove", handleTouchStartOrMove, optsPassv);
+      window.removeEventListener("pointerdown", handlePointerDown, optsPassv);
+      window.removeEventListener("pointerup", handlePointerUpOrCancel, optsPassv);
+      window.removeEventListener("pointercancel", handlePointerUpOrCancel, optsPassv);
+      if (infoToastTimerRef.current) clearTimeout(infoToastTimerRef.current);
+    };
+  }, [activateFullSecurityScreen, clearClipboard, pauseProtectedMedia, logSecurityIncident, showAwayGuard, hideAwayGuard, isPaymentActive]);
+
+  // ─── LAYER 5: Background Clipboard Guard ───────────────────────────────────
+  useEffect(() => {
+    let last = 0;
+    const sanitize = () => {
+      if (document.hidden) {
+        const now = Date.now();
+        if (now - last > 2000) {
+          last = now;
+          clearClipboard();
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", sanitize);
+    window.addEventListener("pagehide", sanitize);
+    return () => {
+      document.removeEventListener("visibilitychange", sanitize);
+      window.removeEventListener("pagehide", sanitize);
+    };
+  }, [clearClipboard]);
+
+  // ─── RENDER ───────────────────────────────────────────────────────────────
+  return (
+    <>
+      {children}
+
+      {/* ─────────────────────────────────────────────────────────────────────
+          APP-SWITCHER / LOCK-SCREEN COVER
+          Always mounted (never conditionally rendered) so toggling its
+          visibility via classList is instantaneous — no React render pass to
+          wait for — covering the screen before the OS can snapshot it for
+          the recents/app-switcher preview or during screen lock.
+          ───────────────────────────────────────────────────────────────────── */}
+      <div ref={awayGuardRef} className="oc-away-guard" aria-hidden="true">
+        <div className="oc-away-guard__card">
+          <div className="oc-away-guard__icon-wrap">
+            <i className="bi bi-shield-slash-fill oc-away-guard__icon oc-pulse-icon" />
+          </div>
+          <div className="oc-away-guard__badge">
+            <i className="bi bi-exclamation-octagon-fill me-1" />
+            DRM Academic Protection Active
+          </div>
+          <div className="oc-away-guard__title">
+            SCREENSHOT &amp; SCREEN RECORDING RESTRICTED
+          </div>
+          <div className="oc-away-guard__alert-banner">
+            ⚠️ You cannot able to take screen short.
+          </div>
+          <div className="oc-away-guard__sub">
+            Taking screenshots (3-finger swipe, shortcuts) or screen recording of educational lectures and materials is strictly prohibited.
+          </div>
+          <div className="oc-away-guard__hint">
+            <i className="bi bi-shield-check me-1" /> Return to active viewing to continue
+          </div>
+        </div>
+      </div>
+
+      {/* ─────────────────────────────────────────────────────────────────────
+          FULL-SCREEN OFFICIAL SECURITY DISPLAY
+          Appears INSTANTLY ("before only display") covering the ENTIRE SCREEN
+          so that Win+Shift+S, Win+G, Win+Alt+R, PrtScn capture ONLY this security screen!
+          ───────────────────────────────────────────────────────────────────── */}
+      {screenLock && (
+        <div
+          className="oc-full-security-screen"
+          role="alertdialog"
+          aria-modal="true"
+          aria-label="Academic Security Alert"
+        >
+          {/* Watermark Pattern Background */}
+          <div className="oc-full-sec__watermark-bg" aria-hidden="true">
+            {Array.from({ length: 14 }).map((_, idx) => (
+              <div key={idx} className="oc-full-sec__watermark-row">
+                <span>ACADEMIC DRM ACTIVE</span>
+                <span>•</span>
+                <span>SCREEN CAPTURE PROHIBITED</span>
+                <span>•</span>
+                <span>UNAUTHORIZED RECORDING RESTRICTED</span>
+                <span>•</span>
+                <span>CONFIDENTIAL MATERIAL</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Central Authoritative Security Display Card */}
+          <div className="oc-full-sec__card">
+            {/* Top Shield Emblem */}
+            <div className="oc-full-sec__icon-wrap">
+              <i className="bi bi-shield-slash-fill oc-full-sec__pulse-icon" />
+            </div>
+
+            {/* Pill Badge */}
+            <div className="oc-full-sec__badge">
+              <i className="bi bi-shield-lock-fill me-1" />
+              Institutional DRM Security Active
+            </div>
+
+            {/* Main Title */}
+            <h2 className="oc-full-sec__title">{screenLock.title}</h2>
+
+            {/* Critical Alert Banner */}
+            <div className="oc-full-sec__alert-banner">
+              ⚠️ You cannot able to take screen short.
+            </div>
+
+            {/* Shortcut Detection Banner */}
+            <div className="oc-full-sec__banner">
+              <i className="bi bi-exclamation-octagon-fill me-2" />
+              DETECTION ALERT: <span className="oc-full-sec__key">{screenLock.shortcut}</span>
+            </div>
+
+            {/* Comprehensive Description */}
+            <p className="oc-full-sec__desc">{screenLock.reason}</p>
+
+            {/* Forensic Audit Metadata Box */}
+            <div className="oc-full-sec__audit-box">
+              <div className="oc-full-sec__audit-row">
+                <span className="text-white-50">
+                  <i className="bi bi-person-circle me-1" /> Authorized Student:
+                </span>
+                <span className="text-white fw-bold">{username}</span>
+              </div>
+
+              <div className="oc-full-sec__audit-row">
+                <span className="text-white-50">
+                  <i className="bi bi-fingerprint me-1" /> Security Session ID:
+                </span>
+                <span className="text-warning font-monospace fw-bold">{sessionId}</span>
+              </div>
+
+              <div className="oc-full-sec__audit-row">
+                <span className="text-white-50">
+                  <i className="bi bi-clock-history me-1" /> Incident Timestamp:
+                </span>
+                <span className="text-info">{screenLock.time}</span>
+              </div>
+
+              <div className="oc-full-sec__audit-row oc-full-sec__audit-status">
+                <span className="text-white-50">
+                  <i className="bi bi-shield-check me-1" /> Security Audit Status:
+                </span>
+                <span className="text-danger fw-bold">
+                  <i className="bi bi-record-circle-fill me-1" /> Logged &amp; Verified by Server
+                </span>
+              </div>
+            </div>
+
+            {/* Resume Button */}
+            <div className="d-flex justify-content-center mt-4">
+              <button
+                type="button"
+                className="oc-full-sec__resume-btn"
+                onClick={dismissSecurityScreen}
+              >
+                <i className="bi bi-shield-check fs-5 me-2" />
+                I Understand &mdash; Resume Learning
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── INFORMATIONAL TOAST (Login confirmation) ───────────────────────── */}
+      {infoToast && (
+        <div className="oc-sec-info-toast" role="status" aria-live="polite">
+          <i className="bi bi-shield-check me-2" style={{ fontSize: "1.15rem" }} />
+          <span>{infoToast.message}</span>
+          <button
+            type="button"
+            className="btn-close btn-close-white ms-3"
+            aria-label="Close"
+            onClick={() => setInfoToast(null)}
+            style={{ fontSize: "0.75rem" }}
+          />
+        </div>
+      )}
+    </>
+  );
+}
